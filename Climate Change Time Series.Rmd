@@ -1,0 +1,320 @@
+---
+title: "Climate Change Time Series"
+author: "Austin Jia"
+date: '2022-03-16'
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Libraries
+```{R}
+library(xts)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(hrbrthemes)
+library(forecast)
+library(GGally)
+library(gridExtra)
+```
+
+###Reading Data
+```{r}
+train = read.csv("DailyDelhiClimateTrain.csv")
+test = read.csv("DailyDelhiClimateTest.csv")
+full = rbind(train, test)
+
+nrow(train)
+nrow(test)
+```
+
+###Data Wrangling
+```{r}
+#Converting to 
+train$date = as.Date(train$date, format = "%Y-%m-%d")
+test$date = as.Date(test$date, format = "%Y-%m-%d")
+full$date = as.Date(full$date, format = "%Y-%m-%d")
+
+#Convert first day to day of the year
+dayofyear = as.numeric(format(train[1,1], "%j"))
+train.ts = ts(train$meantemp, start = c(2013, dayofyear), frequency=365)
+test.ts = ts(test$meantemp, start = c(2013, dayofyear), frequency=365)
+full.ts = ts(full$meantemp, start= c(2013, dayofyear), frequency=365)
+```
+
+###Exploratory Data Analysis
+```{r}
+max(full$meantemp)
+mean(full$meantemp)
+full$date[full$meantemp == max(full$meantemp)]
+
+#Overall time-seriesplot
+full %>%
+  ggplot(aes(x=date, y=meantemp)) +
+  geom_line(color="#69b3a2") +
+  ylim(0, 50) +
+  annotate(geom="text", x=as.Date("2014-01-25"), y=45, label = "Peak of 38.7 degrees in the middle of 2013") +
+  annotate(geom = "point", x=as.Date("2013-05-25"), y=38.71429, size = 10, shape=21, fill = "transparent") +
+  geom_hline(yintercept = mean(train$meantemp), color = "orange", size = .5) +
+  theme_ipsum()
+
+#Seasonal plots
+ggseasonplot(full.ts, year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("Mean Temperature") +
+  xlab("Months") + 
+  ggtitle("Seasonal plot: mean temperature")
+
+#Distribution plots with other covariates
+GGally::ggpairs(as.data.frame(full[,2:5]))
+
+#Lag plots -- reflects strong seasonality
+full2.ts <- window(full.ts, start=2013)
+gglagplot(full2.ts, h = 12)
+
+ggAcf(full2.ts)
+```
+
+###Forecasting -- No Other Predictors
+####Forecasting
+```{r}
+#Benchmarks of mean, naive, and seasonal naive
+autoplot(train.ts) +
+  autolayer(meanf(train.ts, h=300),
+    series="Mean", PI=FALSE) +
+  autolayer(naive(train.ts, h=300),
+    series="Naïve", PI=FALSE) +
+  autolayer(snaive(train.ts, h=300),
+    series="Seasonal naïve", PI=FALSE) +
+  ggtitle("Forecasts for Daily Mean Temperature") +
+  xlab("Year") + ylab("Mean Temperature") +
+  guides(colour=guide_legend(title="Forecast"))
+
+#Benchmark forecasts with intervals
+autoplot(train.ts) + autolayer(meanf(train.ts, h=300),
+    series="Mean", PI=TRUE) +
+  ggtitle("Forecasts for Daily Mean Temperature") +
+  xlab("Year") + ylab("Mean Temperature") +
+  guides(colour=guide_legend(title="Forecast"))
+
+autoplot(train.ts) + autolayer(naive(train.ts, h=300),
+    series="Naive", PI=TRUE) +
+  ggtitle("Forecasts for Daily Mean Temperature") +
+  xlab("Year") + ylab("Mean Temperature") +
+  guides(colour=guide_legend(title="Forecast"))
+
+autoplot(train.ts) + autolayer(snaive(train.ts, h=300),
+    series="Seasonal Naive", PI=TRUE) +
+  ggtitle("Forecasts for Daily Mean Temperature") +
+  xlab("Year") + ylab("Mean Temperature") +
+  guides(colour=guide_legend(title="Forecast"))
+
+#Drift, with bias-adjustment
+drift1 = rwf(train.ts, drift=TRUE, lambda=0, h=114, level=50)
+drift2 = rwf(train.ts, drift=TRUE, lambda=0, h=114, level=50,
+  biasadj=TRUE)
+autoplot(train.ts) +
+  autolayer(drift1, series="Simple back transformation") +
+  autolayer(drift2, series="Bias adjusted", PI=FALSE) +
+  guides(colour=guide_legend(title="Forecast"))
+```
+
+####Residuals
+```{r}
+#Mean
+checkresiduals(meanf(train.ts))
+
+#Naive
+checkresiduals(naive(train.ts))
+
+#Seasonal Naive
+checkresiduals(snaive(train.ts))
+```
+
+#### Accuracy
+```{r}
+#Visualization of forecast against test set
+meanf <- meanf(train.ts,h=114)
+rfw <- rwf(train.ts,h=114)
+snaive <- snaive(train.ts,h=114)
+autoplot(window(full.ts, start=2013)) +
+  autolayer(meanf, series="Mean", PI=FALSE) +
+  autolayer(rfw, series="Naïve", PI=FALSE) +
+  autolayer(snaive, series="Seasonal naïve", PI=FALSE) +
+  xlab("Date") + ylab("Mean Temperature") +
+  ggtitle("Forecasts for daily temperature") +
+  guides(colour=guide_legend(title="Forecast"))
+
+#Quantifying errors
+test2.ts <- window(full.ts, start=2017)
+accuracy(meanf, test2.ts)
+accuracy(rfw, test2.ts)
+accuracy(snaive, test2.ts)
+```
+
+###Time Series Regression
+####Data Wrangling
+```{r}
+full.ts.predictors = ts(full, start=2013, frequency=365)
+train.ts.predictors = ts(train, start=2013, frequency=365)
+test.ts.predictors = ts(test, start=2017, frequency=365)
+
+colnames(full)
+```
+
+####EDA
+```{R}
+autoplot(full.ts.predictors[,c("meantemp","wind_speed")]) +
+  ylab("Y Measurement") + xlab("Year")
+
+autoplot(full.ts.predictors[,c("meantemp","humidity")]) +
+  ylab("Y Measurement") + xlab("Year")
+
+autoplot(full.ts.predictors[,c("meantemp","meanpressure")]) +
+  ylab("Y Measurement") + xlab("Year")
+```
+
+####Modeling
+```{R}
+#Fitting the Model
+fit.predictors <- tslm(
+  meantemp ~ humidity + wind_speed + meanpressure,
+  data=full.ts.predictors)
+summary(fit.predictors)
+
+#Time plot of actual temperatures and predicted temperatures
+autoplot(full.ts.predictors[,'meantemp'], series="Data") +
+  autolayer(fitted(fit.predictors), series="Fitted") +
+  xlab("Year") + ylab("") +
+  ggtitle("Mean Temperature") +
+  guides(colour=guide_legend(title=" "))
+
+#Actual temperature plotted against predicted temperature
+cbind(Data = full.ts.predictors[,"meantemp"],
+      Fitted = fitted(fit.predictors)) %>%
+  as.data.frame() %>%
+  ggplot(aes(x=Data, y=Fitted)) +
+    geom_point() +
+    ylab("Fitted (predicted values)") +
+    xlab("Data (actual values)") +
+    ggtitle("Mean Temperature") +
+    geom_abline(intercept=0, slope=1)
+
+#Checking Residuals
+checkresiduals(fit.predictors)
+
+#Residual plots against predictors -- don't look good!
+df <- as.data.frame(full.ts.predictors)
+df[,"Residuals"]  <- as.numeric(residuals(fit.predictors))
+p1 <- ggplot(df, aes(x=meanpressure, y=Residuals)) +
+  geom_point()
+p2 <- ggplot(df, aes(x=wind_speed, y=Residuals)) +
+  geom_point()
+p3 <- ggplot(df, aes(x=humidity, y=Residuals)) +
+  geom_point()
+gridExtra::grid.arrange(p1, p2, p3, nrow=2)
+
+#Residuals versus fitted values -- violates homoscedasticity
+cbind(Fitted = fitted(fit.predictors),
+      Residuals=residuals(fit.predictors)) %>%
+  as.data.frame() %>%
+  ggplot(aes(x=Fitted, y=Residuals)) + geom_point()
+
+CV(fit.predictors)
+```
+
+###Time Series Regression with Trend and Season
+####Modeling
+```{R}
+#Fitting the model
+fit.trend <- tslm(full.ts ~ trend + season)
+summary(fit.trend)
+
+#Visualizing results -- Time plot of actual temperature and predicted temperature
+autoplot(full.ts, series="Data") +
+  autolayer(fitted(fit.trend), series="Fitted") +
+  xlab("Year") + ylab("Megalitres") +
+  ggtitle("Quarterly Beer Production")
+
+CV(fit.trend)
+
+#Visualizing 
+fcast.trend <- forecast(fit.trend)
+autoplot(fcast.trend) +
+  ggtitle("Forecasts of mean temperature using regression") +
+  xlab("Year") + ylab("megalitres")
+```
+
+###Forecasting Through Decomposition
+```{R}
+#Classical decomposition
+full.ts %>% decompose(type="multiplicative") %>%
+  autoplot() + xlab("Year") +
+  ggtitle("Classical multiplicative decomposition
+    of electrical equipment index")
+
+#STL Decomposition
+full.ts %>%
+  stl(t.window=13, s.window="periodic", robust=TRUE) %>%
+  autoplot()
+
+#Modeling through decomposition
+fit.stl <- stl(full.ts, t.window=2, s.window="periodic",
+  robust=TRUE)
+fit.stl %>% seasadj() %>% naive() %>%
+  autoplot() + ylab("New orders index") +
+  ggtitle("Naive forecasts of seasonally adjusted data")
+
+fit.stl %>% forecast(method="naive") %>%
+  autoplot() + ylab("New orders index")
+```
+
+###Exponential Smoothing
+####Simple Exponential Smoothing
+```{R}
+fit.ses <- ses(full.ts, h=5)
+# Accuracy of one-step-ahead training errors
+round(accuracy(fit.ses),2)
+
+#Visualizing predictions
+autoplot(fit.ses) +
+  autolayer(fitted(fit.ses), series="Fitted") +
+  ylab("Mean Temperature") + xlab("Year")
+
+checkresiduals(ses(full.ts))
+```
+
+####Holt Method
+```{R}
+#Fitting
+fit.holt <- holt(full.ts, h=500)
+round(accuracy(fit.holt),2)
+
+#Dampened Holt
+fit.holt.damp <- holt(full.ts, damped=TRUE, phi = 0.9, h=500)
+round(accuracy(fit.holt.damp), 2)
+
+#Visualizing Fit
+autoplot(full.ts) +
+  autolayer(fit.holt, series="Holt's method", PI=FALSE) +
+  autolayer(fit.holt.damp, series="Damped Holt's method", PI=FALSE) +
+  ggtitle("Forecasts from Holt's method") + xlab("Year") +
+  ylab("Mean Temperature") +
+  guides(colour=guide_legend(title="Forecast"))
+
+checkresiduals(holt(full.ts))
+```
+
+###ARIMA Fitting
+```{R}
+d.arima <- auto.arima(train.ts)
+d.forecast <- forecast(d.arima, level = c(95), h = 50)
+autoplot(d.forecast)
+checkresiduals(d.arima)
+
+round(accuracy(d.arima),2)
+```
